@@ -40,13 +40,13 @@ export default {
         return;
       }
 
-      const prefixProcessed = await handlePrefixCommand(message, client);
-      if (prefixProcessed) {
+      const mentionProcessed = await handleMentionChat(message, client);
+      if (mentionProcessed) {
         return;
       }
 
-      const mentionProcessed = await handleMentionChat(message, client);
-      if (mentionProcessed) {
+      const prefixProcessed = await handlePrefixCommand(message, client);
+      if (prefixProcessed) {
         return;
       }
 
