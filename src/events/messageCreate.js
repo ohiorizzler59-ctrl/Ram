@@ -1,4 +1,5 @@
 import { Events } from 'discord.js';
+import { GoogleGenAI } from '@google/genai';
 import { logger } from '../utils/logger.js';
 import { getLevelingConfig, getUserLevelData } from '../services/leveling/leveling.js';
 import { addXp } from '../services/leveling/xpSystem.js';
@@ -22,6 +23,10 @@ import {
 const MESSAGE_XP_RATE_LIMIT_ATTEMPTS = 12;
 const MESSAGE_XP_RATE_LIMIT_WINDOW_MS = 10000;
 
+const ai = process.env.GEMINI_API_KEY
+  ? new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
+  : null;
+
 export default {
   name: Events.MessageCreate,
   async execute(message, client) {
@@ -35,7 +40,15 @@ export default {
         return;
       }
 
-      await handlePrefixCommand(message, client);
+      const prefixProcessed = await handlePrefixCommand(message, client);
+      if (prefixProcessed) {
+        return;
+      }
+
+      const mentionProcessed = await handleMentionChat(message, client);
+      if (mentionProcessed) {
+        return;
+      }
 
       await handleLeveling(message, client);
     } catch (error) {
@@ -44,6 +57,66 @@ export default {
   }
 };
 
+async function handleMentionChat(message, client) {
+  try {
+    if (message.mentions.everyone) return false;
+    if (!client.user || !message.mentions.has(client.user.id)) return false;
+
+    const prompt = message.content
+      .replace(new RegExp(`<@!?${client.user.id}>`, 'g'), '')
+      .trim();
+
+    if (!prompt) {
+      await message.reply('Ask me something after pinging me—for example: `@Ram whats capital of france`');
+      return true;
+    }
+
+    if (!ai) {
+      logger.warn('GEMINI_API_KEY is not set; skipping mention AI reply.');
+      await message.reply('My AI key (`GEMINI_API_KEY`) is not configured yet.');
+      return true;
+    }
+
+    if (isMaintenanceMode() && !isBotOwner(message.author.id)) {
+      await message.channel.send({
+        embeds: [createEmbed({
+          title: 'Maintenance Mode',
+          description: getBotMessage('maintenanceMode'),
+          color: 'warning',
+        })],
+      }).catch(() => {});
+      return true;
+    }
+
+    await message.channel.sendTyping().catch(() => {});
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: prompt,
+      config: {
+        systemInstruction: 'You are Ram, a helpful Discord bot. Keep answers concise, accurate, and natural for Discord chat.',
+      },
+    });
+
+    const replyText = response.text?.trim() || 'I could not come up with an answer.';
+
+    if (replyText.length > 2000) {
+      const chunks = replyText.match(/[\s\S]{1,2000}/g) || [];
+      for (const chunk of chunks) {
+        await message.reply(chunk);
+      }
+    } else {
+      await message.reply(replyText);
+    }
+
+    return true;
+  } catch (error) {
+    logger.error('Error handling mention chat:', error);
+    await message.reply('Something went wrong while generating a reply.').catch(() => {});
+    return true;
+  }
+}
+
 async function handlePrefixCommand(message, client) {
   try {
     const guildConfig = await getGuildConfig(client, message.guild.id);
@@ -51,7 +124,7 @@ async function handlePrefixCommand(message, client) {
     const parsed = parsePrefixCommand(message.content, prefix);
     
     if (!parsed) {
-      return; 
+      return false; 
     }
 
     let { commandName, args } = parsed;
@@ -70,7 +143,7 @@ async function handlePrefixCommand(message, client) {
 
     if (!command) {
       logger.warn(`Command not found: ${resolvedCommandName}`);
-      return; 
+      return false; 
     }
 
     if (isMaintenanceMode() && !isBotOwner(message.author.id)) {
@@ -81,7 +154,7 @@ async function handlePrefixCommand(message, client) {
           color: 'warning',
         })],
       }).catch(() => {});
-      return;
+      return true;
     }
 
     if (!isCommandCategoryEnabled(command.category)) {
@@ -92,7 +165,7 @@ async function handlePrefixCommand(message, client) {
           color: 'error',
         })],
       }).catch(() => {});
-      return;
+      return true;
     }
 
     const restriction = getPrefixRestriction(command, args, resolveSubcommandAlias);
@@ -105,7 +178,7 @@ async function handlePrefixCommand(message, client) {
         });
         await message.channel.send({ embeds: [embed] }).catch(() => {});
       }
-      return;
+      return true;
     }
 
     if (!(await isCommandEnabled(client, message.guild.id, resolvePrefixAccessKey(command.data, args), command.category))) {
@@ -115,7 +188,7 @@ async function handlePrefixCommand(message, client) {
         color: 'error',
       });
       await message.channel.send({ embeds: [embed] }).catch(() => {});
-      return;
+      return true;
     }
 
     const mockInteractionForProtection = {
@@ -135,14 +208,16 @@ async function handlePrefixCommand(message, client) {
         color: 'error',
       });
       await message.channel.send({ embeds: [embed] }).catch(() => {});
-      return;
+      return true;
     }
 
     logger.info(`Executing prefix command: ${prefix}${commandName} (resolved to ${resolvedCommandName}) by ${message.author.tag}`);
     
     await executePrefixCommand(command, message, args, client, prefix, guildConfig);
+    return true;
   } catch (error) {
     logger.error('Error handling prefix command:', error);
+    return false;
   }
 }
 
